@@ -13,6 +13,7 @@
     "three": "^0.180.0"
   },
   "scripts": {
+    "start": "node server.mjs",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "repository": {
