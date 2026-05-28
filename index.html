@@ -1260,20 +1260,20 @@ let CFG = {
       name: "Nimetön",
       theme: { lang: 'en', brightness:"dark", ratio:"wide", layout:"port" },
       view: { image: 'NONE' },
-      avatar: {},
-      camera: { frame: 'full' },
+      avatar: { name: 'FaceMode' },
+      camera: { frame: 'head' },
       ai: {},
-      voice: { background: "NONE", type: "google", google:{ id: "en-GB-Standard-A"}, lipsync:{ lang: 'en' } }
+      voice: { background: "NONE", type: "google", google:{ id: "en-US-Neural2-F"}, lipsync:{ lang: 'en' }, standardVoiceVersion: 1 }
     },
     {
       name: "Nimetön 2",
 
       theme: { lang: 'en', brightness: "dark", ratio: "wide", layout: "land" },
       view: { image: 'NONE' },
-      avatar: {},
-      camera: { frame: 'upper' },
+      avatar: { name: 'FaceMode' },
+      camera: { frame: 'head' },
       ai: {},
-      voice: { background: "NONE", type: "google", google:{ id: "en-GB-Standard-A"}, lipsync:{ lang: 'en' } }
+      voice: { background: "NONE", type: "google", google:{ id: "en-US-Neural2-F"}, lipsync:{ lang: 'en' }, standardVoiceVersion: 1 }
     },
   ]
 };
@@ -1308,6 +1308,84 @@ try {
 }
 
 window.cfg = cfg;
+
+function migrateLocalGeminiProxy(config) {
+  let changed = false;
+  config.sessions?.forEach(session => {
+    session.ai = session.ai || {};
+    if (!session.ai.model || session.ai.model.startsWith('gpt')) {
+      session.ai.model = 'gemini-2.5-flash';
+      changed = true;
+    }
+  });
+  return changed;
+}
+
+function migrateFaceModeDefaults(config) {
+  const standardFemaleVoice = 'en-US-Neural2-F';
+  const standardVoiceVersion = 1;
+  const maleVoiceIds = new Set([
+    'en-GB-Standard-D',
+    'en-US-Neural2-D',
+    'en-US-TonyNeural',
+    'pNInz6obpgDQGcFmaJgB',
+    'ErXwobaYiN019PkySvjV',
+    'VR6AewLTigWG4xSOukaG',
+    'TxGEqnHWrfWFTfGW9XjX',
+    'yoZ06aMxZJJ28mfd3POQ'
+  ]);
+  let changed = false;
+  config.sessions?.forEach(session => {
+    session.avatar = session.avatar || {};
+    if (!session.avatar.name) {
+      session.avatar.name = 'FaceMode';
+      changed = true;
+    }
+
+    session.camera = session.camera || {};
+    if (!session.camera.frame || session.camera.frame === 'full' || session.camera.frame === 'upper') {
+      session.camera.frame = 'head';
+      changed = true;
+    }
+
+    session.voice = session.voice || {};
+    session.voice.type = session.voice.type || 'google';
+    session.voice.google = session.voice.google || {};
+    session.voice.microsoft = session.voice.microsoft || {};
+    session.voice.eleven = session.voice.eleven || {};
+    const activeVoiceId = session.voice[session.voice.type]?.id;
+    const needsStandardVoice = session.voice.standardVoiceVersion !== standardVoiceVersion;
+    if (
+      needsStandardVoice &&
+      (session.voice.type !== 'google' || !activeVoiceId || maleVoiceIds.has(activeVoiceId))
+    ) {
+      session.voice.type = 'google';
+      session.voice.google.id = standardFemaleVoice;
+      session.voice.standardVoiceVersion = standardVoiceVersion;
+      changed = true;
+    } else if (!session.voice.google.id || session.voice.google.id === 'en-GB-Standard-A') {
+      session.voice.google.id = standardFemaleVoice;
+      changed = true;
+    }
+    if (needsStandardVoice && session.voice.type === 'google' && session.voice.google.id === standardFemaleVoice) {
+      session.voice.standardVoiceVersion = standardVoiceVersion;
+      changed = true;
+    }
+
+    session.voice.lipsync = session.voice.lipsync || {};
+    if (!session.voice.lipsync.lang) {
+      session.voice.lipsync.lang = 'en';
+      changed = true;
+    }
+  });
+  return changed;
+}
+
+const geminiProxyChanged = migrateLocalGeminiProxy(CFG);
+const faceModeDefaultsChanged = migrateFaceModeDefaults(CFG);
+if ( geminiProxyChanged || faceModeDefaultsChanged ) {
+  localStorage.setItem("talkinghead", JSON.stringify(CFG));
+}
 
 // Save config to localStorage and show active session config
 let loadingConfig = false;
@@ -2333,7 +2411,10 @@ async function geminiSendMessage(node,msgs) {
         maxOutputTokens: cfg('ai-gemini-output'),
         topP: cfg('ai-gemini-topp'),
         topK: cfg('ai-gemini-topk'),
-        candidateCount: 1
+        candidateCount: 1,
+        thinkingConfig: {
+          thinkingBudget: 0
+        }
       }
     };
 
@@ -2409,11 +2490,10 @@ async function geminiSendMessage(node,msgs) {
       let url;
       let headers = { "Content-Type": "application/json; charset=utf-8" };
       const apikey = d3.select("#apikey-gemini").property("value");
+      url = geminiProxy + cfg("ai-model") + ':streamGenerateContent?alt=sse';
       if ( apikey ) {
-        url = geminiEndpoint + cfg("ai-model") + ':streamGenerateContent?alt=sse';
         headers["x-goog-api-key"] = apikey;
       } else {
-        url = geminiProxy + cfg("ai-model") + ':streamGenerateContent?alt=sse';
         headers["Authorization"] = "Bearer " + await jwtGet()
       }
 
@@ -2454,7 +2534,7 @@ async function geminiSendMessage(node,msgs) {
                 } catch(error) {
                   console.log( "Error JSON parsing data: " + data );
                 }
-                if ( finish !== 'STOP' ) {
+                if ( finish !== 'STOP' && !(finish === 'MAX_TOKENS' && tts) ) {
                   throw new Error("Stopped for " + finish + ".");
                 }
               }
@@ -2506,8 +2586,16 @@ async function geminiSendMessage(node,msgs) {
         }
 
       } else {
-        console.error( await res.text() );
-        throw new Error( json.error ? json.error.message : ''+res.status );
+        const text = await res.text();
+        let message = ''+res.status;
+        try {
+          const json = JSON.parse(text);
+          message = json?.error?.message || message;
+        } catch(error) {
+          if ( text ) message = text;
+        }
+        console.error(text);
+        throw new Error(message);
       }
 
       // Call function
@@ -3742,7 +3830,7 @@ document.addEventListener('DOMContentLoaded', async function(e) {
     ttsEndpoint: googleTTSProxy,
     cameraZoomEnable: true,
     cameraPanEnable: true,
-    cameraView: 'full',
+    cameraView: 'head',
     avatarMood: 'neutral',
     lipsyncModules: ["en", "fi", "lt", "fr", "de"],
     // Stats display that can be used when testing performance
@@ -4787,10 +4875,10 @@ document.addEventListener('DOMContentLoaded', async function(e) {
             <div class="text label" data-i18n-text="AI"></div>
             <div class="column">
               <div class="rowWrap">
-                <div class="command selected" data-item="ai-model" data-type="option" data-ai-model="gpt-4.1-mini">GPT-4.1-mini</div>
+                <div class="command" data-item="ai-model" data-type="option" data-ai-model="gpt-4.1-mini">GPT-4.1-mini</div>
                 <div class="command" data-item="ai-model" data-type="option" data-ai-model="gpt-4.1">GPT-4.1</div>
                 <div class="command" data-item="ai-model" data-type="option" data-ai-model="grok-3">Grok-3</div>
-                <div class="command" data-item="ai-model" data-type="option" data-ai-model="gemini-2.5-flash">Gemini-2.5-flash</div>
+                <div class="command selected" data-item="ai-model" data-type="option" data-ai-model="gemini-2.5-flash">Gemini-2.5-flash</div>
                 <div class="command" data-item="ai-model" data-type="option" data-ai-model="llama">Llama</div>
               </div>
             </div>
@@ -5923,8 +6011,8 @@ document.addEventListener('DOMContentLoaded', async function(e) {
               <div class="rowWrap">
                 <div class="command" data-i18n-text="Full" data-item="camera-frame" data-type="option" data-camera-frame="full"></div>
                 <div class="command" data-i18n-text="Mid" data-item="camera-frame" data-type="option" data-camera-frame="mid"></div>
-                <div class="command selected" data-i18n-text="Upper" data-item="camera-frame" data-type="option" data-camera-frame="upper"></div>
-                <div class="command" data-i18n-text="Head" data-item="camera-frame" data-type="option" data-camera-frame="head"></div>
+                <div class="command" data-i18n-text="Upper" data-item="camera-frame" data-type="option" data-camera-frame="upper"></div>
+                <div class="command selected" data-i18n-text="Head" data-item="camera-frame" data-type="option" data-camera-frame="head"></div>
               </div>
             </div>
           </div>
